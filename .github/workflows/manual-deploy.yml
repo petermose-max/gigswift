@@ -1,0 +1,22 @@
+name: Manual Deploy
+
+# Trigger a deploy by hand (Actions tab -> Run workflow) without pushing to main.
+# Useful when the Oracle VM is rebuilt and needs the latest image redeployed.
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            cd /opt/gigswift
+            docker compose pull
+            docker compose run --rm app alembic upgrade head
+            docker compose up -d
+            docker image prune -f

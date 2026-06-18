@@ -1,0 +1,29 @@
+# Production dependencies only. Dev/test tools live in requirements-dev.txt.
+# Kept in sync with [project.dependencies] in pyproject.toml.
+
+# Web framework + ASGI server
+fastapi==0.111.0
+uvicorn[standard]>=0.30,<0.31
+
+# Scheduler
+APScheduler>=3.10,<4.0
+
+# ORM (async) + async PostgreSQL driver + migrations
+SQLAlchemy[asyncio]>=2.0,<2.1
+asyncpg>=0.29,<0.30
+alembic>=1.13,<2.0
+
+# Config
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
+
+# Ingestion
+feedparser>=6.0,<7.0
+Telethon>=1.36,<2.0
+
+# Publishing ([async] extra: aiohttp, async_lru, oauthlib for tweepy.AsyncClient)
+tweepy[async]>=4.14,<5.0
+python-telegram-bot>=21.0,<22.0
+
+# Image generation
+Pillow>=10.3,<11.0
