@@ -57,8 +57,8 @@ class TelegramFormatter(BaseFormatter):
         # Always show something useful — never "See listing for details".
         blurb = summary["summary_line"] or summary["what_you_do"]
 
-        pay = format_pay_amounts(job)
-        pay_text = f"{pay} per hour" if pay else "Not specified"
+        # format_pay_amounts now carries its own unit (e.g. "$45-$85/hr" or "$80k-$120k/year").
+        pay_text = format_pay_amounts(job) or "Not specified"
 
         lines = [f"💼 *{escape_markdownv2(title)}*"]
         if company:

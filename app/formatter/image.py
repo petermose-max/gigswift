@@ -207,7 +207,7 @@ def _variant_dark_command(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
     )
     draw.line([(0, 196), (w, 196)], fill="#1F2937", width=1)
     if pay:
-        draw.text((x, 214), f"{pay} / hour", font=_font(32), fill="#F59E0B")
+        draw.text((x, 214), pay, font=_font(32), fill="#F59E0B")
     _draw_info(
         draw,
         summary,
@@ -247,7 +247,7 @@ def _variant_navy_precision(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
     )
     draw.line([(int(w * 0.12), 276), (int(w * 0.88), 276)], fill="#1E3A5F", width=2)
     if pay:
-        draw.text((w // 2, 296), f"{pay} / hour", font=_font(30), fill="#F59E0B", anchor="ma")
+        draw.text((w // 2, 296), pay, font=_font(30), fill="#F59E0B", anchor="ma")
     _draw_info(
         draw,
         summary,
@@ -275,17 +275,16 @@ def _variant_split_panel(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
     draw.rectangle([0, 0, 880, h], fill="#111111")
     draw.rectangle([880, 0, w, h], fill="#F59E0B")
     panel_cx = 880 + (w - 880) // 2
-    if pay:
+    if pay:  # pay self-describes its unit (/hr or /year) — no separate label needed
         draw.text(
-            (panel_cx, 240),
+            (panel_cx, 255),
             pay,
-            font=_font(30),
+            font=_font(26),
             fill="#111111",
             anchor="ma",
             stroke_width=1,
             stroke_fill="#111111",
         )
-        draw.text((panel_cx, 290), "per hour", font=_font(16), fill="#1A1A1A", anchor="ma")
     else:
         draw.text((panel_cx, 260), "Remote", font=_font(24), fill="#111111", anchor="ma")
     draw.text((panel_cx, h - 40), "GigSwift", font=_font(14), fill="#7C5500", anchor="ma")
@@ -332,7 +331,7 @@ def _variant_emerald_edge(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
         stroke=2,
     )
     if pay:
-        draw.text((x, 228), f"{pay} / hour", font=_font(30), fill="#F59E0B")
+        draw.text((x, 228), pay, font=_font(30), fill="#F59E0B")
     _draw_info(
         draw,
         summary,

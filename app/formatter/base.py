@@ -51,20 +51,28 @@ def format_pay_range(job: RawJobSchema, *, unit: str = "hr") -> str | None:
 
 
 def format_pay_amounts(job: RawJobSchema) -> str | None:
-    """Pay figures with a hyphen-minus and no unit, e.g. ``$45-$85``; None if unknown.
+    """Pay figures with a hyphen-minus and a self-describing unit; None if unknown.
 
-    Unlike :func:`format_pay_range`, this never uses an en dash (cards/posts render
-    a plain hyphen) and omits the ``/hr`` suffix so callers can append their own.
+    A raw stored figure over $500 is an annual salary (e.g. 139000) and is shown as
+    ``$139k-$199k/year``; otherwise it is an hourly rate shown as ``$45-$85/hr``.
+    This avoids the confusing "$700/hour" that dividing a salary by 2080 produced.
     """
-    if job.pay_min is None and job.pay_max is None:
+    pay_min, pay_max = job.pay_min, job.pay_max
+    if pay_min is None and pay_max is None:
         return None
     symbol = _currency_symbol(job.pay_currency)
-    low = _to_hourly(job.pay_min) if job.pay_min is not None else None
-    high = _to_hourly(job.pay_max) if job.pay_max is not None else None
-    if low is not None and high is not None:
-        return f"{symbol}{low:.0f}-{symbol}{high:.0f}"
-    value = low if low is not None else high
-    return f"{symbol}{value:.0f}"
+    reference = pay_min if pay_min is not None else pay_max
+
+    if reference is not None and reference > 500:  # stored as an annual salary
+        low = f"{symbol}{int(pay_min) // 1000}k" if pay_min is not None else None
+        high = f"{symbol}{int(pay_max) // 1000}k" if pay_max is not None else None
+        if low and high:
+            return f"{low}-{high}/year"
+        return f"{low or high}/year"
+
+    if pay_min is not None and pay_max is not None:
+        return f"{symbol}{pay_min:.0f}-{symbol}{pay_max:.0f}/hr"
+    return f"{symbol}{reference:.0f}/hr"
 
 
 def split_company_title(title: str) -> tuple[str | None, str]:
@@ -148,10 +156,40 @@ _META_LABEL_RE = re.compile(
 )
 _ABOUT_US_RE = re.compile(r"^\s*about\s+(?:us|the\s+company)\b\s*", re.IGNORECASE)
 _ABOUT_X_RE = re.compile(r"^\s*about\s+([\w&.\-' ]{1,30}):\s*", re.IGNORECASE)
+# "About <Company>, ..." / "At <Company>, ..." company-intro sentences. Bounds use
+# [\w ] (not \s) so they never span a newline into the real content.
+_ABOUT_SENTENCE_RE = re.compile(
+    r"^\s*About\s+\w[\w ]{0,40}(?:At\s+\w[\w ]{0,30})?[,.]\s*", re.IGNORECASE
+)
+# "At <Company>, ..." — the company token must contain a capital (proper noun),
+# allowing a leading digit so "At 1Password, ..." matches but "At the office, ..." not.
+_AT_COMPANY_RE = re.compile(r"^\s*At\s+\w*[A-Z]\w*[^\n.,]*[,.]\s*")
 # Residual metadata lines dropped from card previews (Fix 5).
 _PREVIEW_NOISE_RE = re.compile(
     r"^(?:location|salary|base\s+pay|estimated|travel)\b\s*:?", re.IGNORECASE
 )
+# Section-title headers that can leak into the first requirement line (Fix 2).
+_TITLE_HEADERS = (
+    "requirements",
+    "key requirements",
+    "minimum qualifications",
+    "basic qualifications",
+    "qualifications",
+    "required skills",
+    "what you'll need",
+    "what you need",
+    "what we're looking for",
+    "we're looking for",
+    "must have",
+    "nice to have",
+    "ideal candidate",
+    "responsibilities",
+    "your responsibilities",
+    "what you'll do",
+    "what you will do",
+)
+# Inline separators used to split a paragraph-style requirements section (Fix 4).
+_PARAGRAPH_SPLIT_RE = re.compile(r"(?<=[.;])\s+|\s+and\s+|\s+or\s+", re.IGNORECASE)
 
 # Words that hint a sentence/line states a requirement (fallback extraction).
 _REQUIREMENT_HINT_WORDS = (
@@ -213,7 +251,7 @@ def _strip_noise_prefix(text: str) -> str:
     changed = True
     while changed:
         changed = False
-        for pattern in (_META_LABEL_RE, _ABOUT_US_RE):
+        for pattern in (_META_LABEL_RE, _ABOUT_SENTENCE_RE, _AT_COMPANY_RE, _ABOUT_US_RE):
             match = pattern.match(text)
             if match:
                 text = text[match.end() :].lstrip()
@@ -280,6 +318,15 @@ def _is_header(line_lower: str, headers: tuple[str, ...]) -> bool:
     return False
 
 
+def _strip_header_prefix(line: str) -> str:
+    """Strip a leading repeated section-title header from a content line (Fix 2)."""
+    lower = line.lower()
+    for header in _TITLE_HEADERS:
+        if lower.startswith(header):
+            return line[len(header) :].lstrip(": \t-")
+    return line
+
+
 def _extract_items(
     lines: list[str],
     headers: tuple[str, ...],
@@ -287,15 +334,18 @@ def _extract_items(
     max_items: int,
     clean: Callable[[str], str | None],
 ) -> list[str]:
-    """Collect cleaned phrases under a matching section header (inline or bulleted)."""
+    """Collect cleaned phrases under a matching section header (inline/bulleted/paragraph)."""
     items: list[str] = []
     capturing = False
+    section_start = False
     for line in lines:
         lower = line.lower()
         if _is_header(lower, _REQUIREMENT_HEADERS) or _is_header(lower, _TASK_HEADERS):
             capturing = _is_header(lower, headers)
+            section_start = capturing
             if capturing and ":" in line:
                 # "Requirements: laptop, internet, good English" — split the tail.
+                section_start = False
                 for piece in re.split(r"[,;]|\s[-–]\s", line.split(":", 1)[1]):
                     item = clean(piece)
                     if item:
@@ -303,12 +353,22 @@ def _extract_items(
                         if len(items) >= max_items:
                             return items[:max_items]
             continue
-        if capturing:
-            item = clean(line)
+        if not capturing:
+            continue
+        # Strip a repeated section title from the first content line (Fix 2).
+        content = _strip_header_prefix(line) if section_start else line
+        section_start = False
+        # Paragraph-mode: a long, unbulleted line is split into fragments (Fix 4).
+        if len(content) > 70 and not _LEADING_BULLET_RE.match(content):
+            fragments = [f for f in _PARAGRAPH_SPLIT_RE.split(content) if len(f.strip()) > 15]
+        else:
+            fragments = [content]
+        for fragment in fragments:
+            item = clean(fragment)
             if item:
                 items.append(item)
                 if len(items) >= max_items:
-                    break
+                    return items[:max_items]
     return items[:max_items]
 
 
@@ -356,6 +416,9 @@ def _first_substantive_sentence(text: str, *, min_len: int = 30, max_len: int = 
     fallback: str | None = None
     for sentence in _SENTENCE_SPLIT_RE.split(flat):
         candidate = _strip_lead_header(sentence.strip())
+        if candidate.lower().startswith("responsibilities"):  # Fix 5
+            candidate = candidate[len("responsibilities") :].lstrip(": \t-")
+        candidate = candidate.lstrip(",:;- ").strip()  # drop leftover leading punctuation
         lower = candidate.lower()
         if not candidate or lower.startswith(("headquarters", "url:")) or _is_about_noise(lower):
             continue

@@ -68,8 +68,8 @@ class LinkedInFormatter(BaseFormatter):
         hashtags: str,
     ) -> str:
         lines = [f"Remote Opportunity: {title}", ""]
-        if pay:
-            lines.append(f"💰 {pay}/hour")
+        if pay:  # pay already carries its unit (e.g. "$45-$85/hr" or "$80k-$120k/year")
+            lines.append(f"💰 {pay}")
         lines.append("📍 Remote (Worldwide)")
         if blurb:
             lines += ["", blurb]
