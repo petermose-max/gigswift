@@ -26,6 +26,21 @@ _STRUCTURED_DESCRIPTION = (
     "- A fifth requirement that must be dropped\n"
 )
 
+# We Work Remotely / MyJobMag style: noise (Headquarters/URL/About) before content.
+_WWR_DESCRIPTION = (
+    "Headquarters: United States\n"
+    "URL: https://example.com\n"
+    "\n"
+    "About Us\n"
+    "Close is a bootstrapped, profitable startup building sales communication software.\n"
+    "\n"
+    "Requirements\n"
+    "- 5+ years of software engineering experience\n"
+    "- Strong proficiency with Python and async frameworks\n"
+    "- Experience building and scaling REST APIs\n"
+    "- Excellent written communication skills\n"
+)
+
 
 @pytest.fixture(autouse=True)
 def _isolate_card_dir(tmp_path, monkeypatch) -> None:
@@ -53,6 +68,17 @@ def test_extract_smart_summary_requirements_capped_at_four() -> None:
 def test_extract_smart_summary_handles_empty_description() -> None:
     result = extract_smart_summary("")
     assert result == {"what_you_do": None, "requirements": [], "summary_line": None}
+
+
+def test_extract_smart_summary_finds_requirements_despite_noise_prefix() -> None:
+    # WWR-style descriptions front-load Headquarters/URL/About noise.
+    result = extract_smart_summary(_WWR_DESCRIPTION)
+    assert 1 <= len(result["requirements"]) <= 4
+    joined = " ".join(result["requirements"]).lower()
+    assert "experience" in joined or "python" in joined
+    # the noise lines never become the summary
+    summary = (result["summary_line"] or "").lower()
+    assert not summary.startswith(("headquarters", "url", "about us"))
 
 
 # --------------------------------------------------------------------------- #
@@ -97,6 +123,15 @@ def test_telegram_post_never_says_see_listing(make_raw_job: MakeJob) -> None:
     # Even a sparse description must yield something useful, not a placeholder.
     job = make_raw_job(description="Quick remote gig.")
     assert "See listing for details" not in TelegramFormatter().format(job).content
+
+
+def test_telegram_post_omits_worldwide(make_raw_job: MakeJob) -> None:
+    assert "(Worldwide)" not in TelegramFormatter().format(make_raw_job()).content
+
+
+def test_telegram_post_ends_with_gigswift_handle(make_raw_job: MakeJob) -> None:
+    content = TelegramFormatter().format(make_raw_job()).content
+    assert content.rstrip("_").endswith("@GigSwift")
 
 
 # --------------------------------------------------------------------------- #

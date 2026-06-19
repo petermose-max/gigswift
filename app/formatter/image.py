@@ -3,15 +3,18 @@
 Four professional layout variants rotate deterministically on the job's content
 hash, so a feed of posts looks varied. Card content comes from
 :func:`extract_smart_summary` (requirements + a one-line summary). Pay figures use a
-hyphen-minus (never an en dash). The brand mark is "GigSwift".
+hyphen-minus (never an en dash). Each card shows requirements when available (else a
+description summary), the apply URL near the bottom, and a "GigSwift" mark.
 """
 
 import os
+import re
 
 from PIL import Image, ImageDraw, ImageFont
 
 from app.core.logging import get_logger
 from app.formatter.base import (
+    clean_description_preview,
     extract_smart_summary,
     format_pay_amounts,
     split_company_title,
@@ -25,7 +28,10 @@ CARD_DIR = "/tmp/gigswift_cards"
 CARD_WIDTH = 1200
 CARD_HEIGHT = 630
 
-_Fields = tuple[str | None, str, str | None, str | None, list[str]]
+# (company, title, pay, summary, requirements, apply_url)
+_Fields = tuple[str | None, str, str | None, str | None, list[str], str]
+
+_SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont:
@@ -51,6 +57,12 @@ def _trunc(text: str, limit: int) -> str:
         return text
     cut = text[:limit].rsplit(" ", 1)[0]
     return f"{(cut or text[:limit]).rstrip()}…"
+
+
+def _display_url(url: str) -> str:
+    """Strip the scheme and truncate a URL for compact display on a card."""
+    text = _SCHEME_RE.sub("", url or "").rstrip("/")
+    return f"{text[:50]}..." if len(text) > 50 else text
 
 
 def _wrap(
@@ -122,48 +134,61 @@ def _draw_right(
     draw.text((right_x - draw.textlength(text, font=font), y), text, font=font, fill=fill)
 
 
-def _pill_size(
-    draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, pad_x: int, pad_y: int
-) -> tuple[int, int]:
-    bbox = draw.textbbox((0, 0), text, font=font)
-    return bbox[2] - bbox[0] + 2 * pad_x, bbox[3] - bbox[1] + 2 * pad_y
-
-
-def _draw_pill_row(
+def _draw_req_list(
     draw: ImageDraw.ImageDraw,
-    items: list[str],
+    requirements: list[str],
+    x: int,
     y: int,
     font: ImageFont.FreeTypeFont,
+    fill: str,
     *,
-    bg: str,
-    fg: str,
-    x0: int = 0,
-    x1: int | None = None,
-    align: str = "left",
+    center: bool = False,
+    line_height: int = 30,
     max_items: int = 3,
-    pad_x: int = 12,
-    pad_y: int = 6,
-    gap: int = 10,
+    max_chars: int = 45,
 ) -> None:
-    """Draw a horizontal row of rounded pill labels, left-aligned or centered in [x0, x1]."""
-    labels = [_trunc(item, 22) for item in items[:max_items] if item]
-    if not labels:
-        return
-    x1 = CARD_WIDTH if x1 is None else x1
-    sizes = [_pill_size(draw, label, font, pad_x, pad_y) for label in labels]
-    total = sum(w for w, _ in sizes) + gap * (len(labels) - 1)
-    cursor = x0 + ((x1 - x0) - total) // 2 if align == "center" else x0
-    for label, (w, h) in zip(labels, sizes, strict=True):
-        draw.rounded_rectangle([cursor, y, cursor + w, y + h], radius=h // 2, fill=bg)
-        draw.text((cursor + pad_x, y + h // 2), label, font=font, fill=fg, anchor="lm")
-        cursor += w + gap
+    """Draw up to three requirements as dash-prefixed lines (Pillow has no emoji)."""
+    for req in requirements[:max_items]:
+        text = f"-  {_trunc(req, max_chars)}"
+        if center:
+            draw.text((CARD_WIDTH // 2, y), text, font=font, fill=fill, anchor="ma")
+        else:
+            draw.text((x, y), text, font=font, fill=fill)
+        y += line_height
+
+
+def _draw_info(
+    draw: ImageDraw.ImageDraw,
+    summary: str | None,
+    requirements: list[str],
+    *,
+    x: int,
+    summary_y: int,
+    req_y: int,
+    summary_font: ImageFont.FreeTypeFont,
+    summary_fill: str,
+    req_font: ImageFont.FreeTypeFont,
+    req_fill: str,
+    max_width: int,
+    center: bool = False,
+) -> None:
+    """Show a one/two-line summary plus a requirements list.
+
+    When there are no requirements, the summary expands to fill the space so the
+    card never has an empty gap.
+    """
+    if summary:
+        lines = _wrap(draw, summary, summary_font, max_width, 2 if requirements else 4)
+        _draw_wrapped(draw, lines, summary_y, summary_font, summary_fill, 28, x=x, center=center)
+    if requirements:
+        _draw_req_list(draw, requirements, x, req_y, req_font, req_fill, center=center)
 
 
 # --------------------------------------------------------------------------- #
 # Variants
 # --------------------------------------------------------------------------- #
 def _variant_dark_command(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
-    company, title, pay, summary, requirements = fields
+    company, title, pay, summary, requirements, apply_url = fields
     w, h = CARD_WIDTH, CARD_HEIGHT
     draw.rectangle([0, 0, w, h], fill="#0D1117")
     draw.rectangle([0, 0, 10, h], fill="#F59E0B")
@@ -173,61 +198,86 @@ def _variant_dark_command(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
     _draw_wrapped(
         draw,
         _wrap(draw, title, _font(42), w - x - 40, 2),
-        80,
+        78,
         _font(42),
         "#FFFFFF",
         52,
         x=x,
         stroke=1,
     )
-    draw.line([(0, 220), (w, 220)], fill="#1F2937", width=1)
+    draw.line([(0, 196), (w, 196)], fill="#1F2937", width=1)
     if pay:
-        draw.text((x, 240), f"{pay} / hour", font=_font(34), fill="#F59E0B")
-    if summary:
-        draw.text((x, 300), _trunc(summary, 80), font=_font(18), fill="#9CA3AF")
-    _draw_pill_row(draw, requirements, 370, _font(16), bg="#1F2937", fg="#9CA3AF", x0=x)
+        draw.text((x, 214), f"{pay} / hour", font=_font(32), fill="#F59E0B")
+    _draw_info(
+        draw,
+        summary,
+        requirements,
+        x=x,
+        summary_y=278,
+        req_y=362,
+        summary_font=_font(18),
+        summary_fill="#9CA3AF",
+        req_font=_font(17),
+        req_fill="#9CA3AF",
+        max_width=w - x - 40,
+    )
+    if apply_url:
+        draw.text((x, h - 58), _display_url(apply_url), font=_font(14), fill="#6B7280")
     draw.rectangle([0, h - 3, w, h], fill="#F59E0B")
     _draw_right(draw, "GigSwift", w - 20, h - 34, _font(14), "#374151")
 
 
 def _variant_navy_precision(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
-    company, title, pay, summary, requirements = fields
+    company, title, pay, summary, requirements, apply_url = fields
     w, h = CARD_WIDTH, CARD_HEIGHT
     draw.rectangle([0, 0, w, h], fill="#050A1E")
     draw.rectangle([0, 0, w, 80], fill="#0A1628")
     draw.text((40, 32), "REMOTE OPPORTUNITY", font=_font(13), fill="#3B82F6")
     if company:
-        draw.text((w // 2, 110), _trunc(company, 48), font=_font(22), fill="#60A5FA", anchor="ma")
+        draw.text((w // 2, 106), _trunc(company, 48), font=_font(22), fill="#60A5FA", anchor="ma")
     _draw_wrapped(
         draw,
         _wrap(draw, title, _font(46), int(w * 0.86), 2),
-        160,
+        150,
         _font(46),
         "#FFFFFF",
-        56,
+        54,
         center=True,
         stroke=1,
     )
-    draw.line([(int(w * 0.1), 290), (int(w * 0.9), 290)], fill="#1E3A5F", width=2)
+    draw.line([(int(w * 0.12), 276), (int(w * 0.88), 276)], fill="#1E3A5F", width=2)
     if pay:
-        draw.text((w // 2, 320), f"{pay} / hour", font=_font(32), fill="#F59E0B", anchor="ma")
-    if summary:
-        draw.text((w // 2, 380), _trunc(summary, 80), font=_font(17), fill="#94A3B8", anchor="ma")
-    _draw_pill_row(
-        draw, requirements, 450, _font(16), bg="#0F2044", fg="#60A5FA", x0=0, x1=w, align="center"
+        draw.text((w // 2, 296), f"{pay} / hour", font=_font(30), fill="#F59E0B", anchor="ma")
+    _draw_info(
+        draw,
+        summary,
+        requirements,
+        x=0,
+        summary_y=348,
+        req_y=428,
+        summary_font=_font(17),
+        summary_fill="#94A3B8",
+        req_font=_font(16),
+        req_fill="#60A5FA",
+        max_width=int(w * 0.8),
+        center=True,
     )
+    if apply_url:
+        draw.text(
+            (w // 2, h - 56), _display_url(apply_url), font=_font(14), fill="#64748B", anchor="ma"
+        )
     _draw_right(draw, "GigSwift", w - 20, h - 34, _font(14), "#1E3A5F")
 
 
 def _variant_split_panel(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
-    company, title, pay, summary, requirements = fields
+    company, title, pay, summary, requirements, apply_url = fields
     w, h = CARD_WIDTH, CARD_HEIGHT
     draw.rectangle([0, 0, 880, h], fill="#111111")
     draw.rectangle([880, 0, w, h], fill="#F59E0B")
     panel_cx = 880 + (w - 880) // 2
     if pay:
         draw.text(
-            (panel_cx, 200),
+            (panel_cx, 240),
             pay,
             font=_font(30),
             fill="#111111",
@@ -235,28 +285,35 @@ def _variant_split_panel(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
             stroke_width=1,
             stroke_fill="#111111",
         )
-        draw.text((panel_cx, 250), "per hour", font=_font(16), fill="#1A1A1A", anchor="ma")
-    py = 300
-    for req in requirements[:2]:
-        label = _trunc(req, 18)
-        pw, ph = _pill_size(draw, label, _font(14), 12, 6)
-        px = 880 + ((w - 880) - pw) // 2
-        draw.rounded_rectangle([px, py, px + pw, py + ph], radius=ph // 2, fill="#1A1A1A")
-        draw.text((px + 12, py + ph // 2), label, font=_font(14), fill="#F59E0B", anchor="lm")
-        py += ph + 10
-    _draw_right(draw, "GigSwift", w - 20, h - 34, _font(14), "#7C5500")
+        draw.text((panel_cx, 290), "per hour", font=_font(16), fill="#1A1A1A", anchor="ma")
+    else:
+        draw.text((panel_cx, 260), "Remote", font=_font(24), fill="#111111", anchor="ma")
+    draw.text((panel_cx, h - 40), "GigSwift", font=_font(14), fill="#7C5500", anchor="ma")
+    x = 40
     if company:
-        draw.text((40, 50), _trunc(company, 36), font=_font(22), fill="#D97706")
+        draw.text((x, 50), _trunc(company, 36), font=_font(22), fill="#D97706")
     _draw_wrapped(
-        draw, _wrap(draw, title, _font(42), 820, 3), 100, _font(42), "#FFFFFF", 50, x=40, stroke=1
+        draw, _wrap(draw, title, _font(40), 800, 2), 100, _font(40), "#FFFFFF", 48, x=x, stroke=1
     )
-    if summary:
-        draw.text((40, 280), _trunc(summary, 80), font=_font(18), fill="#A8966E")
-    draw.text((40, 380), "Pay:", font=_font(16), fill="#F59E0B")
+    _draw_info(
+        draw,
+        summary,
+        requirements,
+        x=x,
+        summary_y=248,
+        req_y=360,
+        summary_font=_font(18),
+        summary_fill="#A8966E",
+        req_font=_font(17),
+        req_fill="#A8966E",
+        max_width=800,
+    )
+    if apply_url:
+        draw.text((x, h - 50), _display_url(apply_url), font=_font(14), fill="#6B7280")
 
 
 def _variant_emerald_edge(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
-    company, title, pay, summary, requirements = fields
+    company, title, pay, summary, requirements, apply_url = fields
     w, h = CARD_WIDTH, CARD_HEIGHT
     draw.rectangle([0, 0, w, h], fill="#0F1923")
     draw.rectangle([0, 0, 6, h], fill="#10B981")
@@ -266,19 +323,31 @@ def _variant_emerald_edge(draw: ImageDraw.ImageDraw, fields: _Fields) -> None:
         draw.text((x, 40), _trunc(company, 48), font=_font(20), fill="#10B981")
     _draw_wrapped(
         draw,
-        _wrap(draw, title, _font(50), w - x - 140, 2),
-        90,
-        _font(50),
+        _wrap(draw, title, _font(48), w - x - 140, 2),
+        84,
+        _font(48),
         "#FFFFFF",
-        60,
+        58,
         x=x,
         stroke=2,
     )
     if pay:
-        draw.text((x, 250), f"{pay} / hour", font=_font(32), fill="#F59E0B")
-    if summary:
-        draw.text((x, 310), _trunc(summary, 80), font=_font(17), fill="#6B7280")
-    _draw_pill_row(draw, requirements, 400, _font(16), bg="#1F2937", fg="#10B981", x0=x)
+        draw.text((x, 228), f"{pay} / hour", font=_font(30), fill="#F59E0B")
+    _draw_info(
+        draw,
+        summary,
+        requirements,
+        x=x,
+        summary_y=292,
+        req_y=376,
+        summary_font=_font(17),
+        summary_fill="#6B7280",
+        req_font=_font(17),
+        req_fill="#10B981",
+        max_width=w - x - 60,
+    )
+    if apply_url:
+        draw.text((x, h - 58), _display_url(apply_url), font=_font(14), fill="#6B7280")
     draw.rectangle([0, h - 14, w, h - 10], fill="#10B981")
     _draw_right(draw, "GigSwift", w - 20, h - 34, _font(14), "#374151")
 
@@ -294,9 +363,14 @@ _VARIANTS = (
 def _card_fields(job: RawJobSchema) -> _Fields:
     company, title = split_company_title(job.title)
     summary = extract_smart_summary(job.description)
-    summary_line = summary["summary_line"] or summary["what_you_do"]
+    # Always show something: summary line, else the first task, else a raw preview.
+    blurb = (
+        summary["summary_line"]
+        or summary["what_you_do"]
+        or clean_description_preview(job.description, max_len=100)
+    )
     requirements: list[str] = summary["requirements"]  # type: ignore[assignment]
-    return company, title, format_pay_amounts(job), summary_line, requirements
+    return company, title, format_pay_amounts(job), blurb, requirements, job.apply_url
 
 
 def render_card(job: RawJobSchema, variant: int) -> Image.Image:

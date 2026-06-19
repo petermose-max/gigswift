@@ -8,6 +8,7 @@ import html
 import re
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from decimal import Decimal
 
 from app.pipeline.dedup import compute_content_hash
@@ -87,27 +88,76 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _BLOCK_TAG_RE = re.compile(r"</?(?:li|ul|ol|p|div|br|tr|h[1-6])[^>]*>", re.IGNORECASE)
 _WS_RE = re.compile(r"[ \t]+")
 _LEADING_BULLET_RE = re.compile(r"^[\s·•*\-–—‣◦>]+")
-_LEADING_NUMBER_RE = re.compile(r"^\d+[.)]\s*")
+# Leading numbering: "1." "2)" "(1)" "(a)" "a." etc.
+_LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d{1,3}|[a-zA-Z])[.)]\s+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_URL_LINE_RE = re.compile(r"^(?:https?://|www\.)\S+$|^\S+\.\S{2,}/\S*$", re.IGNORECASE)
 
 _REQUIREMENT_HEADERS = (
     "requirements",
     "key requirements",
+    "minimum qualifications",
+    "basic qualifications",
+    "qualifications",
+    "required skills",
     "what you'll need",
     "what you need",
-    "qualifications",
-    "you have",
     "you'll need",
+    "what we're looking for",
+    "we're looking for",
     "must have",
+    "nice to have",
+    "you have",
+    "you bring",
+    "what you bring",
+    "you are",
+    "ideal candidate",
+    "about you",
+    "who you are",
 )
 _TASK_HEADERS = (
     "what you'll do",
     "what you will do",
     "responsibilities",
+    "your responsibilities",
     "about the role",
+    "in this role",
+    "the role",
     "you will",
+    "you will be",
+    "you'll be",
     "your role",
     "duties",
+    "day to day",
+    "day-to-day",
+)
+
+# Noise sections that precede the real job content on some boards (WWR, MyJobMag).
+_NON_NOISE_ABOUT = {"the role", "the job", "this role", "the position", "you", "the team"}
+_NEXT_LABEL_RE = (
+    r"(?:url|website|about|requirements?|responsibilities|qualifications|what\s+you|who\s+you)"
+)
+_HQ_URL_RE = re.compile(
+    rf"^\s*(?:headquarters|hq|url|website)\s*:[^\n]*?(?=\s+{_NEXT_LABEL_RE}\b|\n|$)",
+    re.IGNORECASE,
+)
+_ABOUT_US_RE = re.compile(r"^\s*about\s+(?:us|the\s+company)\b\s*", re.IGNORECASE)
+_ABOUT_X_RE = re.compile(r"^\s*about\s+([\w&.\-' ]{1,30}):\s*", re.IGNORECASE)
+
+# Words that hint a sentence/line states a requirement (fallback extraction).
+_REQUIREMENT_HINT_WORDS = (
+    "experience",
+    "degree",
+    "skills",
+    "knowledge",
+    "ability",
+    "proficiency",
+    "familiarity",
+    "understanding",
+    "qualification",
+    "expertise",
+    "fluency",
+    "fluent",
 )
 
 
@@ -116,6 +166,34 @@ def _strip_html(text: str) -> str:
     text = _BLOCK_TAG_RE.sub("\n", text)
     text = _TAG_RE.sub("", text)
     return html.unescape(text)
+
+
+def _is_about_noise(text_lower: str) -> bool:
+    """True if a line/sentence is an 'About Us'/'About <Company>:' noise prefix."""
+    if text_lower.startswith("about us") or text_lower.startswith("about the company"):
+        return True
+    match = _ABOUT_X_RE.match(text_lower)
+    return bool(match) and match.group(1).strip() not in _NON_NOISE_ABOUT
+
+
+def _strip_noise_prefix(text: str) -> str:
+    """Iteratively remove leading Headquarters/URL/About-Us noise from a description."""
+    changed = True
+    while changed:
+        changed = False
+        for pattern in (_HQ_URL_RE, _ABOUT_US_RE):
+            match = pattern.match(text)
+            if match:
+                text = text[match.end() :].lstrip()
+                changed = True
+                break
+        if changed:
+            continue
+        match = _ABOUT_X_RE.match(text)
+        if match and match.group(1).strip().lower() not in _NON_NOISE_ABOUT:
+            text = text[match.end() :].lstrip()
+            changed = True
+    return text
 
 
 def _clean_line(line: str) -> str:
@@ -135,15 +213,45 @@ def _truncate_words(text: str, limit: int) -> str:
     return (cut or text[:limit]).rstrip()
 
 
+def _clean_requirement(item: str) -> str | None:
+    """Clean a candidate requirement; drop too-short/too-long/URL items."""
+    item = _clean_line(item)
+    if not item or item.lower().startswith("http") or _URL_LINE_RE.match(item):
+        return None
+    if len(item) < 8:  # too short to be meaningful
+        return None
+    if len(item) > 60:  # trim at last word under 55 chars
+        item = _truncate_words(item, 55)
+    return item or None
+
+
+def _clean_task(item: str) -> str | None:
+    """Clean a candidate task line."""
+    item = _clean_line(item)
+    return _truncate_words(item, 120) if len(item) >= 5 else None
+
+
 def _is_header(line_lower: str, headers: tuple[str, ...]) -> bool:
-    """True if a short line looks like one of the given section headers."""
-    return len(line_lower) <= 60 and any(header in line_lower for header in headers)
+    """True if the line starts with a section header (optionally followed by ':')."""
+    line_lower = line_lower.strip()
+    for header in headers:
+        if line_lower.startswith(header):
+            rest = line_lower[len(header) :].lstrip()
+            if rest == "":
+                return len(line_lower) <= 60  # bare header line, keep it short
+            if rest.startswith(":"):
+                return True  # "Header: ..." with inline content, any length
+    return False
 
 
 def _extract_items(
-    lines: list[str], headers: tuple[str, ...], *, max_items: int, max_len: int
+    lines: list[str],
+    headers: tuple[str, ...],
+    *,
+    max_items: int,
+    clean: Callable[[str], str | None],
 ) -> list[str]:
-    """Collect short phrases under a matching section header (inline or bulleted)."""
+    """Collect cleaned phrases under a matching section header (inline or bulleted)."""
     items: list[str] = []
     capturing = False
     for line in lines:
@@ -152,31 +260,33 @@ def _extract_items(
             capturing = _is_header(lower, headers)
             if capturing and ":" in line:
                 # "Requirements: laptop, internet, good English" — split the tail.
-                tail = line.split(":", 1)[1]
-                for piece in re.split(r"[,;]|\s-\s", tail):
-                    cleaned = _clean_line(piece)
-                    if cleaned:
-                        items.append(_truncate_words(cleaned, max_len))
+                for piece in re.split(r"[,;]|\s[-–]\s", line.split(":", 1)[1]):
+                    item = clean(piece)
+                    if item:
+                        items.append(item)
                         if len(items) >= max_items:
                             return items[:max_items]
             continue
         if capturing:
-            cleaned = _clean_line(line)
-            if len(cleaned) > 1:
-                items.append(_truncate_words(cleaned, max_len))
+            item = clean(line)
+            if item:
+                items.append(item)
                 if len(items) >= max_items:
                     break
     return items[:max_items]
 
 
-def _first_sentences(text: str, *, count: int = 2, max_len: int = 160) -> str | None:
-    """Return the first ``count`` sentences of ``text``, trimmed to ``max_len``."""
-    flat = _WS_RE.sub(" ", text.replace("\n", " ")).strip()
-    if not flat:
-        return None
-    sentences = _SENTENCE_SPLIT_RE.split(flat)
-    summary = " ".join(sentences[:count]).strip()
-    return _truncate_words(summary, max_len) or None
+def _fallback_requirements(cleaned: str, *, max_items: int = 3) -> list[str]:
+    """Pull requirement-like sentences from the first 400 chars when no section exists."""
+    items: list[str] = []
+    for chunk in re.split(r"[.\n]", cleaned[:400]):
+        if any(word in chunk.lower() for word in _REQUIREMENT_HINT_WORDS):
+            req = _clean_requirement(chunk)
+            if req:
+                items.append(req)
+                if len(items) >= max_items:
+                    break
+    return items
 
 
 def _strip_lead_header(text: str) -> str:
@@ -191,32 +301,58 @@ def _strip_lead_header(text: str) -> str:
     return text
 
 
-def extract_smart_summary(description: str) -> dict[str, object]:
-    """Heuristically parse a job description.
+def _first_substantive_sentence(text: str, *, min_len: int = 30, max_len: int = 160) -> str | None:
+    """First meaningful sentence: over ``min_len`` chars and not a noise prefix."""
+    flat = _WS_RE.sub(" ", text.replace("\n", " ")).strip()
+    fallback: str | None = None
+    for sentence in _SENTENCE_SPLIT_RE.split(flat):
+        candidate = _strip_lead_header(sentence.strip())
+        lower = candidate.lower()
+        if not candidate or lower.startswith(("headquarters", "url:")) or _is_about_noise(lower):
+            continue
+        if fallback is None:
+            fallback = candidate
+        if len(candidate) >= min_len:
+            return _truncate_words(candidate, max_len)
+    return _truncate_words(fallback, max_len) if fallback else None
 
-    Returns a dict with ``what_you_do`` (str | None), ``requirements``
-    (list[str], up to 4 short phrases) and ``summary_line`` (str | None). HTML is
-    stripped first; bullet glyphs and whitespace are normalized.
+
+def extract_smart_summary(description: str) -> dict[str, object]:
+    """Heuristically parse a job description into summary + requirements.
+
+    Returns ``what_you_do`` (str | None), ``requirements`` (list[str], up to 4 short
+    phrases) and ``summary_line`` (str | None). HTML is stripped and common noise
+    prefixes (Headquarters/URL/About Us) are removed before parsing. If no section
+    yields requirements, requirement-like sentences are used as a fallback.
     """
-    cleaned = _strip_html(description or "")
+    cleaned = _strip_noise_prefix(_strip_html(description or ""))
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
 
-    requirements = _extract_items(lines, _REQUIREMENT_HEADERS, max_items=4, max_len=40)
-    tasks = _extract_items(lines, _TASK_HEADERS, max_items=2, max_len=120)
-    what_you_do = _truncate_words("; ".join(tasks), 120) if tasks else None
+    requirements = _extract_items(
+        lines, _REQUIREMENT_HEADERS, max_items=4, clean=_clean_requirement
+    )
+    tasks = _extract_items(lines, _TASK_HEADERS, max_items=2, clean=_clean_task)
+    if not requirements:
+        requirements = _fallback_requirements(cleaned, max_items=3)
 
-    # With structured sections, one lead sentence is the cleanest summary; without
-    # them, fall back to the first two sentences (per the spec).
-    structured = bool(requirements or tasks)
-    summary_line = _first_sentences(cleaned, count=1 if structured else 2, max_len=160)
-    if summary_line:
-        summary_line = _strip_lead_header(summary_line)
+    what_you_do = _truncate_words("; ".join(tasks), 120) if tasks else None
+    summary_line = _first_substantive_sentence(cleaned, min_len=30, max_len=160)
 
     return {
         "what_you_do": what_you_do,
         "requirements": requirements,
         "summary_line": summary_line,
     }
+
+
+def clean_description_preview(description: str, *, max_len: int = 100) -> str | None:
+    """A de-noised one-line preview of a description for cards (first sentence)."""
+    cleaned = _strip_noise_prefix(_strip_html(description or ""))
+    preview = _first_substantive_sentence(cleaned, min_len=20, max_len=max_len)
+    if preview:
+        return preview
+    flat = _WS_RE.sub(" ", cleaned.replace("\n", " ")).strip()
+    return _truncate_words(flat, max_len) or None
 
 
 def is_entry_level(job: RawJobSchema) -> bool:

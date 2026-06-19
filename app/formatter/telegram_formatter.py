@@ -66,7 +66,7 @@ class TelegramFormatter(BaseFormatter):
         lines += [
             "",
             f"💰 *Pay:* {escape_markdownv2(pay_text)}",
-            "📍 *Location:* Remote \\(Worldwide\\)",
+            "📍 *Location:* Remote",
         ]
         if blurb:
             lines += ["", escape_markdownv2(blurb)]
@@ -74,7 +74,7 @@ class TelegramFormatter(BaseFormatter):
         lines += [f"\\- {escape_markdownv2(req)}" for req in requirements]
         if job.apply_url:
             lines += ["", f"🔗 [Apply here]({_escape_url(job.apply_url)})"]
-        lines += ["", "_Posted by GigSwift_"]
+        lines += ["", "_@GigSwift_"]
 
         return PostCreateSchema(
             job_id=placeholder_job_id(job),
