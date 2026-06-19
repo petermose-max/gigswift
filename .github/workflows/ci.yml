@@ -7,6 +7,7 @@ on:
     branches: [main]
   schedule:
     - cron: '*/30 * * * *'   # redundant backup pipeline run
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -68,7 +69,7 @@ jobs:
             docker image prune -f
 
   run-pipeline:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: []
     runs-on: ubuntu-latest
     steps:
