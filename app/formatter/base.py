@@ -134,15 +134,24 @@ _TASK_HEADERS = (
 
 # Noise sections that precede the real job content on some boards (WWR, MyJobMag).
 _NON_NOISE_ABOUT = {"the role", "the job", "this role", "the position", "you", "the team"}
-_NEXT_LABEL_RE = (
-    r"(?:url|website|about|requirements?|responsibilities|qualifications|what\s+you|who\s+you)"
+_META_LABEL_ALT = (
+    r"headquarters|hq|url|website|location|salary|job\s+type|employment\s+type"
+    r"|base\s+pay(?:\s+range)?|estimated\s+travel|company|department|reports\s+to"
 )
-_HQ_URL_RE = re.compile(
-    rf"^\s*(?:headquarters|hq|url|website)\s*:[^\n]*?(?=\s+{_NEXT_LABEL_RE}\b|\n|$)",
+_NEXT_LABEL_RE = (
+    rf"(?:{_META_LABEL_ALT}|about|requirements?|responsibilities"
+    r"|qualifications|what\s+you|who\s+you)"
+)
+_META_LABEL_RE = re.compile(
+    rf"^\s*(?:{_META_LABEL_ALT})\s*:[^\n]*?(?=\s+{_NEXT_LABEL_RE}\b|\n|$)",
     re.IGNORECASE,
 )
 _ABOUT_US_RE = re.compile(r"^\s*about\s+(?:us|the\s+company)\b\s*", re.IGNORECASE)
 _ABOUT_X_RE = re.compile(r"^\s*about\s+([\w&.\-' ]{1,30}):\s*", re.IGNORECASE)
+# Residual metadata lines dropped from card previews (Fix 5).
+_PREVIEW_NOISE_RE = re.compile(
+    r"^(?:location|salary|base\s+pay|estimated|travel)\b\s*:?", re.IGNORECASE
+)
 
 # Words that hint a sentence/line states a requirement (fallback extraction).
 _REQUIREMENT_HINT_WORDS = (
@@ -159,6 +168,29 @@ _REQUIREMENT_HINT_WORDS = (
     "fluency",
     "fluent",
 )
+
+# Legal / recruiter boilerplate. Any sentence or bullet containing one of these is
+# skipped entirely (EEO statements, agency notices, background-check disclaimers).
+BOILERPLATE_PHRASES = [
+    "does not accept unsolicited",
+    "no agencies please",
+    "no recruiters",
+    "equal opportunity employer",
+    "eeo",
+    "we are an equal",
+    "affirmative action",
+    "disability",
+    "veteran",
+    "background check",
+    "staffing agencies",
+    "outside agencies",
+    "recruitment agencies",
+]
+
+
+def _is_boilerplate(text_lower: str) -> bool:
+    """True if the text contains a legal/recruiter boilerplate phrase to skip."""
+    return any(phrase in text_lower for phrase in BOILERPLATE_PHRASES)
 
 
 def _strip_html(text: str) -> str:
@@ -181,7 +213,7 @@ def _strip_noise_prefix(text: str) -> str:
     changed = True
     while changed:
         changed = False
-        for pattern in (_HQ_URL_RE, _ABOUT_US_RE):
+        for pattern in (_META_LABEL_RE, _ABOUT_US_RE):
             match = pattern.match(text)
             if match:
                 text = text[match.end() :].lstrip()
@@ -214,9 +246,11 @@ def _truncate_words(text: str, limit: int) -> str:
 
 
 def _clean_requirement(item: str) -> str | None:
-    """Clean a candidate requirement; drop too-short/too-long/URL items."""
+    """Clean a candidate requirement; drop too-short/too-long/URL/boilerplate items."""
     item = _clean_line(item)
     if not item or item.lower().startswith("http") or _URL_LINE_RE.match(item):
+        return None
+    if _is_boilerplate(item.lower()):
         return None
     if len(item) < 8:  # too short to be meaningful
         return None
@@ -228,7 +262,9 @@ def _clean_requirement(item: str) -> str | None:
 def _clean_task(item: str) -> str | None:
     """Clean a candidate task line."""
     item = _clean_line(item)
-    return _truncate_words(item, 120) if len(item) >= 5 else None
+    if len(item) < 5 or _is_boilerplate(item.lower()):
+        return None
+    return _truncate_words(item, 120)
 
 
 def _is_header(line_lower: str, headers: tuple[str, ...]) -> bool:
@@ -276,16 +312,29 @@ def _extract_items(
     return items[:max_items]
 
 
-def _fallback_requirements(cleaned: str, *, max_items: int = 3) -> list[str]:
-    """Pull requirement-like sentences from the first 400 chars when no section exists."""
+def _fallback_requirements(
+    cleaned: str, summary_line: str | None, *, max_items: int = 3
+) -> list[str]:
+    """Pull requirement-like sentences from the first 400 chars when no section exists.
+
+    Skips boilerplate and any sentence already used as the ``summary_line`` (compared
+    on normalized, lowercased text) to avoid duplicating it as a requirement.
+    """
+    summary_norm = (summary_line or "").strip().lower()
     items: list[str] = []
     for chunk in re.split(r"[.\n]", cleaned[:400]):
-        if any(word in chunk.lower() for word in _REQUIREMENT_HINT_WORDS):
-            req = _clean_requirement(chunk)
-            if req:
-                items.append(req)
-                if len(items) >= max_items:
-                    break
+        lower = chunk.lower()
+        if _is_boilerplate(lower) or not any(word in lower for word in _REQUIREMENT_HINT_WORDS):
+            continue
+        req = _clean_requirement(chunk)
+        if not req:
+            continue
+        req_norm = req.lower()
+        if summary_norm and (req_norm in summary_norm or summary_norm in req_norm):
+            continue  # already conveyed by the summary line
+        items.append(req)
+        if len(items) >= max_items:
+            break
     return items
 
 
@@ -310,6 +359,8 @@ def _first_substantive_sentence(text: str, *, min_len: int = 30, max_len: int = 
         lower = candidate.lower()
         if not candidate or lower.startswith(("headquarters", "url:")) or _is_about_noise(lower):
             continue
+        if _is_boilerplate(lower):
+            continue
         if fallback is None:
             fallback = candidate
         if len(candidate) >= min_len:
@@ -326,17 +377,31 @@ def extract_smart_summary(description: str) -> dict[str, object]:
     yields requirements, requirement-like sentences are used as a fallback.
     """
     cleaned = _strip_noise_prefix(_strip_html(description or ""))
-    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in cleaned.splitlines()
+        if line.strip() and not _is_boilerplate(line.lower())
+    ]
+
+    summary_line = _first_substantive_sentence(cleaned, min_len=30, max_len=160)
 
     requirements = _extract_items(
         lines, _REQUIREMENT_HEADERS, max_items=4, clean=_clean_requirement
     )
     tasks = _extract_items(lines, _TASK_HEADERS, max_items=2, clean=_clean_task)
     if not requirements:
-        requirements = _fallback_requirements(cleaned, max_items=3)
+        requirements = _fallback_requirements(cleaned, summary_line, max_items=3)
+
+    # Deduplicate: drop requirements already conveyed by the summary line.
+    if summary_line:
+        summary_norm = summary_line.lower()
+        requirements = [
+            req
+            for req in requirements
+            if not (req.lower().startswith(summary_norm) or req.lower() in summary_norm)
+        ]
 
     what_you_do = _truncate_words("; ".join(tasks), 120) if tasks else None
-    summary_line = _first_substantive_sentence(cleaned, min_len=30, max_len=160)
 
     return {
         "what_you_do": what_you_do,
@@ -348,6 +413,12 @@ def extract_smart_summary(description: str) -> dict[str, object]:
 def clean_description_preview(description: str, *, max_len: int = 100) -> str | None:
     """A de-noised one-line preview of a description for cards (first sentence)."""
     cleaned = _strip_noise_prefix(_strip_html(description or ""))
+    # Drop any residual metadata lines (Location:/Salary:/Base Pay:/Estimated/Travel:).
+    cleaned = "\n".join(
+        line
+        for line in cleaned.splitlines()
+        if not _PREVIEW_NOISE_RE.match(line.strip()) and not _is_boilerplate(line.lower())
+    )
     preview = _first_substantive_sentence(cleaned, min_len=20, max_len=max_len)
     if preview:
         return preview
