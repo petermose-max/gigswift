@@ -49,6 +49,7 @@ jobs:
 
   deploy:
     needs: build-and-push
+    if: false  # disabled until an Oracle VM is available; re-enable to deploy
     runs-on: ubuntu-latest
     steps:
       - uses: appleboy/ssh-action@v1
