@@ -1,16 +1,17 @@
-"""Telegram formatter: MarkdownV2 post (design section 9) with an attached card.
+"""Telegram formatter: a clean MarkdownV2 post with an attached card.
 
 The publisher sends this with ``parse_mode="MarkdownV2"``, so all literal/dynamic
 text is escaped via :func:`escape_markdownv2`. Intentional structure — the ``*``
-around bold labels, the ``[ ]( )`` of the inline link, and the ``_`` italics — is
-left unescaped.
+around bold, the ``[ ]( )`` of the link, the ``_`` italics, and the escaped ``\\-``
+bullets — is written directly.
 """
 
 from app.formatter.base import (
     BaseFormatter,
-    format_pay_range,
-    is_entry_level,
+    extract_smart_summary,
+    format_pay_amounts,
     placeholder_job_id,
+    split_company_title,
 )
 from app.formatter.image import safe_generate_card
 from app.schemas.job import RawJobSchema
@@ -20,6 +21,8 @@ from app.schemas.post import PostCreateSchema
 # escaped before the others — otherwise the backslashes prepended to the remaining
 # characters below would themselves be doubled.
 _MARKDOWNV2_SPECIAL = r"\_*[]()~`>#+-=|{}.!"
+
+_MAX_REQUIREMENTS = 4
 
 
 def escape_markdownv2(text: str) -> str:
@@ -41,29 +44,37 @@ def _escape_url(url: str) -> str:
 
 
 class TelegramFormatter(BaseFormatter):
-    """Formats a job into a longer-form Telegram MarkdownV2 post."""
+    """Formats a job into a clean, well-spaced Telegram MarkdownV2 post."""
 
     platform = "telegram"
 
     def format(self, job: RawJobSchema) -> PostCreateSchema:
         image_path = safe_generate_card(job)
 
-        pay = format_pay_range(job, unit="hour") or "Not specified"
-        requirements = (
-            "None — training provided" if is_entry_level(job) else "See listing for details"
-        )
+        company, title = split_company_title(job.title)
+        summary = extract_smart_summary(job.description)
+        requirements = summary["requirements"][:_MAX_REQUIREMENTS] or ["Open to all levels"]
+        # Always show something useful — never "See listing for details".
+        blurb = summary["summary_line"] or summary["what_you_do"]
 
-        lines = [
-            "📢 New Opportunity",
+        pay = format_pay_amounts(job)
+        pay_text = f"{pay} per hour" if pay else "Not specified"
+
+        lines = [f"💼 *{escape_markdownv2(title)}*"]
+        if company:
+            lines.append(f"🏢 {escape_markdownv2(company)}")
+        lines += [
             "",
-            f"*Role:* {escape_markdownv2(job.title)}",
-            f"*Pay:* {escape_markdownv2(pay)}",
-            f"*Location:* {escape_markdownv2('Remote (Worldwide)')}",
-            f"*Requirements:* {escape_markdownv2(requirements)}",
+            f"💰 *Pay:* {escape_markdownv2(pay_text)}",
+            "📍 *Location:* Remote \\(Worldwide\\)",
         ]
+        if blurb:
+            lines += ["", escape_markdownv2(blurb)]
+        lines += ["", "✅ *Requirements:*"]
+        lines += [f"\\- {escape_markdownv2(req)}" for req in requirements]
         if job.apply_url:
-            lines += ["", f"[{escape_markdownv2('Apply here')}]({_escape_url(job.apply_url)})"]
-        lines += ["", "_Posted by GigSwift Agent_"]
+            lines += ["", f"🔗 [Apply here]({_escape_url(job.apply_url)})"]
+        lines += ["", "_Posted by GigSwift_"]
 
         return PostCreateSchema(
             job_id=placeholder_job_id(job),

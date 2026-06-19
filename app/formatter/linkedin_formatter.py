@@ -1,19 +1,21 @@
-"""LinkedIn formatter: a concise, professional text share.
+"""LinkedIn formatter: a concise, professional plain-text share (no card for v1).
 
-Professional tone, at most three relevant hashtags, capped at 700 characters (a
-good LinkedIn length). No image card is attached for v1.
+Uses :func:`extract_smart_summary` for a one-line summary and key requirements,
+keeps three hashtags, and caps the post at 700 characters.
 """
 
 from app.formatter.base import (
     BaseFormatter,
-    format_pay_range,
-    is_entry_level,
+    extract_smart_summary,
+    format_pay_amounts,
     placeholder_job_id,
+    split_company_title,
 )
 from app.schemas.job import RawJobSchema
 from app.schemas.post import PostCreateSchema
 
 MAX_LINKEDIN_LENGTH = 700
+_MAX_REQUIREMENTS = 3
 
 # Title/description keywords mapped to a single professional topical hashtag.
 _KEYWORD_HASHTAGS: dict[str, str] = {
@@ -30,17 +32,22 @@ _KEYWORD_HASHTAGS: dict[str, str] = {
 
 
 class LinkedInFormatter(BaseFormatter):
-    """Formats a job into a professional LinkedIn post (<=3 hashtags, <=700 chars)."""
+    """Formats a job into a professional LinkedIn post (3 hashtags, <=700 chars)."""
 
     platform = "linkedin"
 
     def format(self, job: RawJobSchema) -> PostCreateSchema:
-        pay = format_pay_range(job, unit="hour") or "Not specified"
-        requirements = "No experience needed" if is_entry_level(job) else "See listing for details"
+        _, title = split_company_title(job.title)
+        summary = extract_smart_summary(job.description)
+        requirements = summary["requirements"][:_MAX_REQUIREMENTS] or ["Open to all levels"]
+        blurb = summary["summary_line"] or summary["what_you_do"]
+        pay = format_pay_amounts(job)
+        hashtags = self._hashtags(job)
 
-        content = self._build(job, job.title, pay, requirements)
+        content = self._build(title, pay, blurb, requirements, job.apply_url, hashtags)
         if len(content) > MAX_LINKEDIN_LENGTH:
-            content = self._build(job, self._shorten_title(job, content), pay, requirements)
+            title = self._shorten_title(title, len(content) - MAX_LINKEDIN_LENGTH)
+            content = self._build(title, pay, blurb, requirements, job.apply_url, hashtags)
         if len(content) > MAX_LINKEDIN_LENGTH:
             content = content[:MAX_LINKEDIN_LENGTH].rstrip()
 
@@ -51,32 +58,37 @@ class LinkedInFormatter(BaseFormatter):
             image_path=None,  # LinkedIn image upload skipped for v1
         )
 
-    def _build(self, job: RawJobSchema, title: str, pay: str, requirements: str) -> str:
-        lines = [
-            "New remote opportunity:",
-            "",
-            f"Role: {title}",
-            f"Pay: {pay}",
-            "Location: Remote (Worldwide)",
-            f"Requirements: {requirements}",
-        ]
-        if job.apply_url:
-            lines += ["", f"Apply: {job.apply_url}"]
-        lines += ["", self._hashtags(job)]
+    def _build(
+        self,
+        title: str,
+        pay: str | None,
+        blurb: str | None,
+        requirements: list[str],
+        apply_url: str,
+        hashtags: str,
+    ) -> str:
+        lines = [f"Remote Opportunity: {title}", ""]
+        if pay:
+            lines.append(f"💰 {pay}/hour")
+        lines.append("📍 Remote (Worldwide)")
+        if blurb:
+            lines += ["", blurb]
+        lines += ["", "Requirements:"]
+        lines += [f"- {req}" for req in requirements]
+        if apply_url:
+            lines += ["", f"Apply: {apply_url}"]
+        lines += ["", hashtags]
         return "\n".join(lines)
 
-    def _shorten_title(self, job: RawJobSchema, full_content: str) -> str:
-        """Trim the title by the overflow so the rebuilt post fits the limit."""
-        overflow = len(full_content) - MAX_LINKEDIN_LENGTH
-        keep = max(1, len(job.title) - overflow - 1)
-        return f"{job.title[:keep].rstrip()}…"
+    def _shorten_title(self, title: str, overflow: int) -> str:
+        keep = max(1, len(title) - overflow - 1)
+        return f"{title[:keep].rstrip()}…"
 
     def _hashtags(self, job: RawJobSchema) -> str:
-        # Always exactly three: keep it professional, no hashtag spam.
-        tags = ["#RemoteWork", "#GigEconomy", "#Hiring"]
         text = f"{job.title} {job.description}".lower()
+        topical = "#GigEconomy"
         for keyword, tag in _KEYWORD_HASHTAGS.items():
             if keyword in text:
-                tags[1] = tag  # swap in one topical tag, still three total
+                topical = tag
                 break
-        return " ".join(tags[:3])
+        return f"#RemoteWork #Hiring {topical}"

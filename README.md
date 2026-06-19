@@ -227,8 +227,9 @@ Subsequent deploys are fully automated via GitHub Actions.
 
 Links are added once the channels are created.
 
-- X (Twitter): _to be added_
-- Telegram channel: _to be added_
+- Telegram channel: https://t.me/gigswiftjobs
+- LinkedIn: https://www.linkedin.com/company/134374149
+- X (Twitter): coming soon
 
 ## Roadmap
 
