@@ -24,6 +24,7 @@ Telethon>=1.36,<2.0
 # Publishing ([async] extra: aiohttp, async_lru, oauthlib for tweepy.AsyncClient)
 tweepy[async]>=4.14,<5.0
 python-telegram-bot>=21.0,<22.0
+httpx>=0.27,<0.29  # direct async HTTP client for the LinkedIn publisher
 
 # Image generation
 Pillow>=10.3,<11.0

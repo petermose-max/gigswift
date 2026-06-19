@@ -7,6 +7,8 @@ import pytest
 from PIL import Image
 
 from app.formatter import image as image_mod
+from app.formatter.base import format_pay_range
+from app.formatter.linkedin_formatter import MAX_LINKEDIN_LENGTH, LinkedInFormatter
 from app.formatter.telegram_formatter import TelegramFormatter
 from app.formatter.x_formatter import MAX_TWEET_LENGTH, XFormatter
 from app.schemas.job import RawJobSchema
@@ -58,3 +60,18 @@ def test_image_card_handles_missing_pay(make_raw_job: MakeJob) -> None:
     assert os.path.exists(path)  # renders gracefully without pay
     with Image.open(path) as img:
         assert img.size == (image_mod.CARD_WIDTH, image_mod.CARD_HEIGHT)
+
+
+def test_linkedin_post_under_700_with_link_and_pay(make_raw_job: MakeJob) -> None:
+    job = make_raw_job()
+    post = LinkedInFormatter().format(job)
+    assert post.platform == "linkedin"
+    assert len(post.content) <= MAX_LINKEDIN_LENGTH
+    assert job.apply_url in post.content  # apply link present
+    assert format_pay_range(job, unit="hour") in post.content  # pay range present
+    assert post.image_path is None  # no card for v1
+
+
+def test_linkedin_post_truncates_long_title(make_raw_job: MakeJob) -> None:
+    job = make_raw_job(title="Senior Staff Principal " * 50 + "Engineer")
+    assert len(LinkedInFormatter().format(job).content) <= MAX_LINKEDIN_LENGTH

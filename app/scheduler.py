@@ -29,6 +29,7 @@ from app.core.config import Settings, get_settings
 from app.core.database import dispose_engine, get_sessionmaker
 from app.core.logging import configure_logging, get_logger
 from app.formatter.base import BaseFormatter
+from app.formatter.linkedin_formatter import LinkedInFormatter
 from app.formatter.telegram_formatter import TelegramFormatter
 from app.formatter.x_formatter import XFormatter
 from app.ingest.registry import get_all_ingestors
@@ -36,6 +37,7 @@ from app.models import Job, Post, RunLog
 from app.pipeline.dedup import compute_content_hash
 from app.pipeline.runner import run as run_pipeline
 from app.publisher.base import BasePublisher
+from app.publisher.linkedin_publisher import LinkedInPublisher
 from app.publisher.telegram_publisher import TelegramPublisher
 from app.publisher.x_publisher import XPublisher
 from app.schemas.job import JobCreateSchema, RawJobSchema
@@ -48,10 +50,14 @@ Pair = tuple[BaseFormatter, BasePublisher]
 
 def _build_pairs(session: AsyncSession, settings: Settings) -> list[Pair]:
     """Pair each formatter with the publisher for the same platform."""
-    return [
+    pairs: list[Pair] = [
         (XFormatter(), XPublisher(session, settings)),
         (TelegramFormatter(), TelegramPublisher(session, settings)),
     ]
+    # LinkedIn is optional: only post when an access token is configured.
+    if settings.LINKEDIN_ACCESS_TOKEN:
+        pairs.append((LinkedInFormatter(), LinkedInPublisher(session, settings)))
+    return pairs
 
 
 async def _process_job(

@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     TELEGRAM_API_ID: int
     TELEGRAM_API_HASH: str
 
+    # LinkedIn (organization posting) — optional; LinkedIn is skipped when unset
+    LINKEDIN_CLIENT_ID: str = ""
+    LINKEDIN_CLIENT_SECRET: str = ""
+    LINKEDIN_ACCESS_TOKEN: str = ""
+    LINKEDIN_ORGANIZATION_ID: str = ""
+
     # Pipeline tuning
     MIN_SCORE_THRESHOLD: float = 0.5
     MIN_PAY_HOURLY: float = 15.0
